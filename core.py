@@ -4,26 +4,27 @@ from itertools import product
 from types import SimpleNamespace
 import names
 from tabulate import tabulate
+import inflect
+import json
 
-rooms = ['Ballroom', 'Lounge', 'Hall', 'Study', 'Library', 'Billiart Room', 'Conservatory', 'Kitchen', 'Dining Room']
+rooms = ['Dining Room', "Living Room", 'Kitchen', 'Hallway', 'Study', 'Cellar', 'Lounge', 'Rooftop', 'Library']
+ie = inflect.engine()
 
 
 class Group:
     all_ = []
 
-    def __init__(self,vals):
+    def __init__(self, vals):
         self.properties = list(vals)
         self.index = len(self.all_)
         self.all_.append(self)
 
-    def create(self,vals):
+    def create(self, vals):
         self.properties.extend(vals)
 
-
     def __iter__(self):
-        for i,_ in enumerate(self.properties):
-            yield GroupObject(self.index,i)
-
+        for i, _ in enumerate(self.properties):
+            yield GroupObject(self.index, i)
 
 
 class GroupObject:
@@ -40,7 +41,7 @@ class GroupObject:
     def parent(self):
         return Group.all_[self.groupindex]
 
-    def __getattr__(self,value):
+    def __getattr__(self, value):
         return Group.all_[self.groupindex].properties[self.objectindex][value]
 
     def __setattr__(self, key, value):
@@ -51,18 +52,28 @@ class GroupObject:
         return f"<<{s}>>"
 
 
+def generate_name(index):
+    firstletter = 'abcdefghijklmnoprstuvwyz'[index]
+    name = ''
+    while not name.lower().startswith(firstletter.lower()):
+        name = names.get_full_name()
+    return name
+
+
 class Plot:
-    def __init__(self, np, nr, nt):
-        self.people = Group(dict(name=names.get_full_name(), alive=True, guilty=False) for _ in range(np))
-        self.rooms = Group(dict(name=n) for n in sample(rooms, nr))
+    def __init__(self, np, nr, nt, thiefs, affairs, sms, meetings):
+        self.people = Group(dict(name=generate_name(s), alive=True, guilty=False) for s in range(np))
+        self.rooms = Group(dict(name=f'the {n.lower()}') for n in rooms[:nr])
         self.times = Group(dict(name=f"{i + 12}:00", index=i) for i in range(nt))
         self.pools = {k: set(self.people) for k in self.times}
         self.events = Group(dict(loc=r, moment=t, type='', attending=set(), claiming=set()) for r in self.rooms
-                       for t in self.times)
+                            for t in self.times)
 
         self.create_murder()
-        self.create_crime('thief', 1, 3)
-        self.create_crime('affair', 2, 2)
+        self.create_crime('thief', 1, thiefs)
+        self.create_crime('affair', 2, affairs)
+        self.create_crime('secret meeting', 3, sms)
+        self.create_special('meeting', 0, meetings)
         self.distribute_all()
 
     def get_free_event(self):
@@ -78,6 +89,7 @@ class Plot:
         else:
             cev = choice([x for x in self.events if x.moment == event.moment and x != event])
             cev.claiming.add(person)
+        return person
 
     def distribute_all(self):
         for t in self.times:
@@ -94,17 +106,28 @@ class Plot:
 
             for __ in range(np):
                 self.fill_event(event, False)
-            print(tp,event.moment,event.loc, event.attending)
+            print(tp, event.moment, event.loc, event.attending)
+
+    def create_special(self, tp, np, dupl=1):
+        for _ in range(dupl):
+            event = self.get_free_event()
+            event.type = tp
+            if np:
+                for __ in range(np):
+                    self.fill_event(event, True)
+            else:
+                while self.pools[event.moment]:
+                    self.fill_event(event, True)
+            print(tp, event.moment, event.loc, event.attending)
 
     def create_murder(self):
         event = self.get_free_event()
-        victim, murderer = sample(set(self.people), 2)
+        victim = self.fill_event(event, True)
+        murderer = self.fill_event(event, False)
+        event.claiming.remove(victim)
         event.type = 'murder'
         victim.alive = False
         murderer.guilty = True
-        event.attending.add(victim)
-        event.attending.add(murderer)
-        self.pools[event.moment].remove(murderer)
         for after in self.times:
             if after.index > event.moment.index:
                 self.pools[after].remove(victim)
@@ -131,10 +154,9 @@ class Investigate:
         self.gather("claims", self.claims())
         self.gather("alibi", self.alibi())
         self.gather("smart lights", self.smart_lights())
-        self.gather("$crimes",self.crimes())
+        self.gather("$crimes", self.crimes())
 
-
-    def print_properties(self,sol=False):
+    def print_properties(self, sol=False):
         for dp in self.data:
             if bool(sol) != dp.startswith('$'):
                 continue
@@ -151,13 +173,10 @@ class Investigate:
                 yield x.name,
 
     def crimes(self):
-        yield "time", "room","crime", "person"
+        yield "time", "room", "crime", "person"
         for event in self.plot.events:
-            if event.type:
-                for p in event.attending:
-                    if p.alive:
-                        yield event.moment.name, event.loc.name, event.type, p.name
-
+            for p in event.attending:
+                yield event.moment.name, event.loc.name, event.type, p.name
 
     def dna(self):
         yield "room", "person"
@@ -171,7 +190,7 @@ class Investigate:
                 yield x.name, p.name
 
     def claims(self):
-        yield  "time", "room", "person",
+        yield "time", "room", "person",
         for event in self.plot.events:
             print(event.claiming)
             for p in event.claiming:
@@ -179,9 +198,11 @@ class Investigate:
                     yield event.moment.name, event.loc.name, p.name
 
     def alibi(self):
-        yield "time", "room", "witness","spotted",
+        yield "time", "room", "witness", "spotted",
         for event in self.plot.events:
             for witness in event.claiming:
+                if not witness.alive:
+                    continue
                 real = witness in event.attending
                 if real:
                     for spotted in event.attending:
@@ -193,27 +214,129 @@ class Investigate:
                             yield event.moment.name, event.loc.name, witness.name, spotted.name,
 
     def smart_lights(self):
-        yield "time","room","status"
+        yield "time", "room", "status"
         for event in self.plot.events:
             if event.attending:
-                yield event.moment.name, event.loc.name,"on"
+                yield event.moment.name, event.loc.name, "on"
             else:
-                yield event.moment.name, event.loc.name,"off"
+                yield event.moment.name, event.loc.name, "off"
+
+
+def subtitled(string):
+    return '\n' + string + '\n' + '-' * len(string)
+
+
+class WitnessReport:
+    accLocMemory = 1.0
+    accDna = 0.5
+    accPerMemory = 0.5
+    accPerHearsay = 0.2
+    accNumberMemory = 0.4
+
+    def __init__(self, plot):
+        self.plot = plot
+        self.data = []
+
+    def dna(self, witness):
+        yield subtitled(f'dna report of {witness.name}')
+        dna = set()
+        for event in self.plot.events:
+            if witness in event.attending:
+                if random() < self.accDna:
+                    dna.add(event.loc)
+        rooms = ie.join([x.name for x in dna])
+        for x in dna:
+            self.data.append(dict(clue='dna', name=witness.name, room=x.name))
+        if dna:
+            yield "This persons dna was found in the following rooms: {}".format(rooms)
+        else:
+            yield "This persons dna was found nowhere"
+
+    def write(self):
+        yield subtitled("victim name")
+        for x in self.plot.people:
+            if not x.alive:
+                victim = x
+                yield x.name
+        self.data.append(dict(clue='victim',name=victim.name))
+
+        yield from self.dna(victim)
+
+        yield subtitled('inventory report')
+        rooms = set()
+        for event in self.plot.events:
+            if event.type == 'thief':
+                rooms.add(event.loc)
+        for x in rooms:
+            self.data.append(dict(clue='thief', room=x.name))
+        rooms = ie.join([x.name for x in rooms])
+        if rooms:
+            yield 'There is art missing from the following rooms: {}'.format(rooms)
+        else:
+            yield 'N/A'
+
+        for witness in self.plot.people:
+            if not witness.alive:
+                continue
+            yield subtitled(f"Witness statement of {witness.name}")
+            events = sorted([x for x in self.plot.events if witness in x.claiming], key=lambda x: x.moment.index)
+
+            for event in events:
+
+                yield f"At {event.moment.name} I was in {event.loc.name}."
+                d = dict(clue='witness',name=witness.name, room=event.loc.name,time=event.moment.name,others=[])
+                real = witness in event.attending
+                if real:
+                    wouldsay = list(event.attending)
+                    wouldsay.remove(witness)
+                    memory = [x for x in wouldsay if random() < self.accPerMemory]
+                else:
+                    wouldsay = list(event.claiming)
+                    wouldsay.remove(witness)
+                    memory = [x for x in wouldsay if random() < self.accPerHearsay]
+                number = len(wouldsay) - len(memory)
+                memNum = self.accNumberMemory > random()
+
+                people_ = ie.join(sorted([x.name for x in memory]))
+                people = "{} {}".format(ie.number_to_words(number, zero="no"), ie.plural("other person", number))
+                verb = 'was' if number == 1 else 'were'
+                if memory:
+                    d['others'].extend(x.name for x in memory)
+                    yield f"I met with {people_}."
+                    if memNum:
+                        yield f"{people} {verb} there.".capitalize()
+                else:
+                    if memNum:
+                        yield f"In the same room, there {verb} {people}."
+                    else:
+                        yield "I don't remember who else was there."
+                if memNum:
+                    d['total'] = number
+                self.data.append(d)
+                yield ''
+            yield from self.dna(witness)
+        yield subtitled(f"Smart lights log")
+        for event in self.plot.events:
+            status = 'on' if event.attending else 'off'
+            yield f'At {event.moment.name} the lights in {event.loc.name} where {status}'
+            self.data.append(dict(clue='light',time=event.moment.name, room=event.loc.name, status=status))
 
 
 
-
-
-p = Plot(6, 3, 5)
+p = Plot(6, 3, 5, 2, 1, 1, 3)
 
 i = Investigate(p)
-with open('report.txt','w') as file:
-    for x in i.print_properties():
-        file.write(x)
+w = WitnessReport(p)
+
+with open('report.txt', 'w') as file:
+    for line in w.write():
+        file.write(line + '\n')
+
+with open('report.json', 'w') as file:
+    json.dump(w.data, file, indent=1)
 
 with open('solution.txt', 'w') as file:
-    for x in i.print_properties():
-        file.write(x)
+    for line in i.print_properties(True):
+        file.write(line + '\n')
 
 print()
-
